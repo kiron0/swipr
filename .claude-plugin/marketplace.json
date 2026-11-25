@@ -10,7 +10,7 @@
       "name": "swipr",
       "source": "./",
       "description": "Scan local storage, find large files and cleanup opportunities, then review every change before it happens.",
-      "version": "0.1.5",
+      "version": "0.1.6",
       "category": "productivity",
       "tags": ["storage", "disk", "cleanup", "audit"]
     }

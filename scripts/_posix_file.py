@@ -16,6 +16,7 @@ class OpenFile:
         self.handle = None
         self.path = core.absolute(entry['path'])
         self.name = self.path.name
+        core.require(bool(self.name) and self.name not in {'.', '..'} and '/' not in self.name, 'Invalid file name')
         core.require(core.identity(self.path.lstat()) == entry['identity'], 'File changed since the scan')
         self.parent_context = core.directory_fd(self.path.parent)
         self.parent = self.parent_context.__enter__()

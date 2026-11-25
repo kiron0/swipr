@@ -28,7 +28,7 @@ def check():
     assert set(meta) <= {"name", "description", "license", "compatibility", "metadata", "allowed-tools"}
     assert len(body.splitlines()) < 500, "Keep the entry point concise"
     for file in BASE.rglob("*.md"):
-        if ".git" in file.parts or ".venv" in file.parts:
+        if {".git", ".venv", "venv", "node_modules", "dist", "build"} & set(file.parts):
             continue
         for target in re.findall(r"\]\(([^)]+)\)", file.read_text(encoding="utf-8")):
             if re.match(r"[a-z]+://", target) or target.startswith("#"):

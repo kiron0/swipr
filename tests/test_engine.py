@@ -33,9 +33,20 @@ class Fixture(unittest.TestCase):
     def own(self, path, recursive=False):
         if os.name != "nt":
             return
+        import ctypes as c
         import _windows_file as windows
         kernel, security = windows._api()
         sid = windows._current_user(kernel, security)
+        target = Path(path)
+        probe = self.bytecode if target == self.root and self.bytecode.exists() else target
+        if probe.is_file():
+            handle = kernel.CreateFileW("\\\\?\\" + str(probe), 0x20080, 7, None, 3, 0x00200000, None)
+            if handle not in (None, c.c_void_p(-1).value):
+                try:
+                    if windows._owner(kernel, security, handle) == sid:
+                        return
+                finally:
+                    kernel.CloseHandle(handle)
         arguments = ["icacls", str(path), "/setowner", "*" + sid]
         if recursive:
             arguments.append("/T")

@@ -3,6 +3,7 @@ from collections import defaultdict
 from pathlib import Path
 import math
 import os
+import re
 import time
 
 import _core as core
@@ -13,6 +14,10 @@ POLICY_KEYS = {"roots", "exclude", "max_entries", "max_depth", "max_seconds",
                "max_hash_bytes", "preserve_offline", "never_permanently_delete"}
 PROJECT_RULES = {rule["id"]: (tuple(rule["project_markers"]), tuple(rule["artifact_paths"]), rule["application"])
                  for rule in core.read_rules() if rule.get("project_markers")}
+PROJECT_SPECS = [
+    (rule_id, markers, tuple(tuple(p.lower() for p in Path(a).parts) if os.name == "nt" else Path(a).parts for a in artifacts), app)
+    for rule_id, (markers, artifacts, app) in PROJECT_RULES.items()
+]
 ARTIFACT_HEADS = {Path(a).parts[0].casefold() for _, artifacts, _ in PROJECT_RULES.values() for a in artifacts}
 
 
@@ -93,32 +98,44 @@ def project_marker(directory, rule_id, markers, cache):
 
 def project_finding(entry, cache=None):
     path, root = Path(entry["path"]), Path(entry["root"])
-    if not ARTIFACT_HEADS.intersection(x.casefold() for x in path.parts) or core.protected(path):
+    parts = path.parts
+    if not any(x.casefold() in ARTIFACT_HEADS for x in parts) or core.protected(path):
         return None
     cache = {} if cache is None else cache
     markers_cache = cache.setdefault("markers", {})
     verified = cache.setdefault("verified", set())
     try:
-        if str(path.parent) not in verified:
+        parent_str = str(path.parent)
+        if parent_str not in verified:
             core.absolute(path.parent)
-            verified.add(str(path.parent))
+            verified.add(parent_str)
         info = path.lstat()
         if core.redirect(info) or core.identity(info) != entry["identity"]:
             return None
     except (OSError, core.Refusal):
         return None
-    for directory in [path.parent, *path.parent.parents]:
-        if not core.inside(directory, root):
+    if not core.inside(path, root):
+        return None
+    root_len = len(root.parts)
+    parts_cmp = tuple(x.lower() for x in parts) if os.name == "nt" else parts
+    parts_len = len(parts_cmp)
+    for offset, directory in enumerate((path.parent, *path.parent.parents)):
+        idx = parts_len - 1 - offset
+        if idx < root_len:
             break
-        for rule_id, (markers, artifacts, app) in PROJECT_RULES.items():
-            if not any(core.inside(path, directory / artifact) for artifact in artifacts):
+        for rule_id, markers, art_tuples, app in PROJECT_SPECS:
+            if not any(idx + len(ap) <= parts_len and parts_cmp[idx:idx + len(ap)] == ap for ap in art_tuples):
                 continue
             marker = project_marker(directory, rule_id, markers, markers_cache)
             if marker is None:
                 continue
+            try:
+                marker_info = core.identity(marker.lstat())
+            except OSError:
+                continue
             return {"candidate_id": entry["id"], "category": "project-build", "rule_id": rule_id,
                     "classification": "REVIEW", "application": app, "project": str(directory),
-                    "marker": str(marker), "marker_identity": core.identity(marker.lstat()),
+                    "marker": str(marker), "marker_identity": marker_info,
                     "mechanism": "Review the tool's supported clean/preview interface with this project stopped",
                     "side_effects": "Rebuild cost, test output loss, or unavailable offline dependencies; not automatically removable"}
     return None
@@ -127,21 +144,32 @@ def project_finding(entry, cache=None):
 def directory_totals(inventory):
     totals = {}
     seen = defaultdict(set)
+    complete = inventory["complete"]
     for entry in inventory["entries"]:
         root, path = Path(entry["root"]), Path(entry["path"])
-        key = (entry["identity"]["device"], entry["identity"]["inode"])
+        if not core.inside(path, root):
+            continue
+        ident = entry["identity"]
+        dedup = ident["links"] > 1 and ident["inode"] != 0
+        key = (ident["device"], ident["inode"]) if dedup else None
+        logical = entry["logical_bytes"]
+        alloc = entry["allocated_bytes"] or 0
+        remaining = len(path.parts) - len(root.parts)
         for parent in path.parents:
-            if not core.inside(parent, root):
+            if remaining <= 0:
                 break
+            remaining -= 1
             name = str(parent)
             row = totals.get(name)
             if row is None:
                 row = totals[name] = {"path": name, "files": 0, "logical_bytes": 0,
-                                      "allocated_bytes_known": 0, "coverage_complete": inventory["complete"]}
-            if key not in seen[name]:
+                                      "allocated_bytes_known": 0, "coverage_complete": complete}
+            if dedup:
+                if key in seen[name]:
+                    continue
                 seen[name].add(key)
-                row["files"] += 1; row["logical_bytes"] += entry["logical_bytes"]
-                row["allocated_bytes_known"] += entry["allocated_bytes"] or 0
+            row["files"] += 1; row["logical_bytes"] += logical
+            row["allocated_bytes_known"] += alloc
     return sorted(totals.values(), key=lambda x: x["logical_bytes"], reverse=True)
 
 
@@ -172,29 +200,28 @@ def recommendations(request):
     started = time.monotonic()
     complete = request.get("project_analysis_complete", True)
     cache = {}
-    for index, entry in enumerate(inventory["entries"]):
-        if inventory.get("protected_metadata_only"):
-            continue
-        if project_index is not None:
-            project = project_index.get(entry["id"])
-        elif index < 100000 and time.monotonic() - started < 10:
-            project = project_finding(entry, cache)
-        else:
-            project = None; complete = False
-        kind = project["classification"] if project else entry["classification"]
-        category = project["category"] if project else entry["category"]
-        if kind == "PROTECTED" and not project:
-            continue
-        rows.append({"candidate_id": entry["id"], "path": entry["path"], "category": category,
-                     "application": project["application"] if project else entry["application"],
-                     "classification": kind, "logical_bytes": entry["logical_bytes"],
-                     "allocated_bytes": entry["allocated_bytes"], "potential_reclaimable_upper_bound": entry["allocated_bytes"],
-                     "estimated_immediate_free_bytes": None,
-                     "mechanism": entry["strategy"] if not project else project["mechanism"],
-                     "evidence": project or entry["evidence"], "reason": entry["reason"] if not project else "Recognized project marker and exact tool output path",
-                     "side_effects": project["side_effects"] if project else entry["side_effects"],
-                     "recovery": entry["recovery"] if not project else "Rebuild where dependencies and tooling remain available",
-                     "authorization": "not-approved"})
+    if not inventory.get("protected_metadata_only"):
+        for index, entry in enumerate(inventory["entries"]):
+            if project_index is not None:
+                project = project_index.get(entry["id"])
+            elif index < 100000 and time.monotonic() - started < 10:
+                project = project_finding(entry, cache)
+            else:
+                project = None; complete = False
+            kind = project["classification"] if project else entry["classification"]
+            category = project["category"] if project else entry["category"]
+            if kind == "PROTECTED" and not project:
+                continue
+            rows.append({"candidate_id": entry["id"], "path": entry["path"], "category": category,
+                         "application": project["application"] if project else entry["application"],
+                         "classification": kind, "logical_bytes": entry["logical_bytes"],
+                         "allocated_bytes": entry["allocated_bytes"], "potential_reclaimable_upper_bound": entry["allocated_bytes"],
+                         "estimated_immediate_free_bytes": None,
+                         "mechanism": entry["strategy"] if not project else project["mechanism"],
+                         "evidence": project or entry["evidence"], "reason": entry["reason"] if not project else "Recognized project marker and exact tool output path",
+                         "side_effects": project["side_effects"] if project else entry["side_effects"],
+                         "recovery": entry["recovery"] if not project else "Rebuild where dependencies and tooling remain available",
+                         "authorization": "not-approved"})
     rows.sort(key=lambda x: (x["classification"] != "SAFE-CANDIDATE", -x["logical_bytes"]))
     return {"schema_version": 1, "inventory_digest": core.digest(inventory), "candidates": rows,
             "project_analysis_complete": complete,
@@ -233,11 +260,13 @@ def enrich_analysis(inventory, request):
                            "storage_pressure": "critical" if ratio < .03 else "low-free-space" if ratio < .1 else "normal"})
         else:
             health.append({"root": disk["root"], "storage_pressure": "unknown"})
-    return {"ranked_files": sort_entries(entries, sort_by)[:min(max(int(request.get("top", 20)), 1), 100)],
+    now_ns = time.time_ns()
+    top = core._bounded_int(request.get("top"), 20, 1, 100, "Invalid top limit")
+    return {"ranked_files": sort_entries(entries, sort_by)[:top],
             "directories": directories[:100], "project_artifacts": projects, "health": health,
             "project_analysis_complete": inspected == len(entries),
-            "temporary_candidates": [{"candidate_id": e["id"], "age_seconds": max(0, (time.time_ns() - e["identity"]["mtime_ns"]) / 10**9),
-                                       "stale_for_review": time.time_ns() - e["identity"]["mtime_ns"] >= 7 * 86400 * 10**9,
+            "temporary_candidates": [{"candidate_id": e["id"], "age_seconds": max(0, (now_ns - e["identity"]["mtime_ns"]) / 10**9),
+                                       "stale_for_review": now_ns - e["identity"]["mtime_ns"] >= 7 * 86400 * 10**9,
                                        "active_use": "unknown", "classification": "REVIEW", "automatic_removal": False}
                                       for e in entries if e["category"] == "application-temporary"],
             "limitations": ["Metadata does not prove a file is inactive", "Clone/snapshot/shared-block savings are unknown",
@@ -252,16 +281,21 @@ def leftovers(request):
                "Bun": ("bun",), "Cargo": ("rust", "cargo"), "Gradle": ("gradle",), "Xcode": ("xcode",),
                "Firefox": ("firefox",), "Safari": ("safari",), "Homebrew": ("homebrew",),
                "Chromium family": ("chrome", "chromium", "edge", "brave")}
+    found_map = {
+        app: any(re.search(r"(?<![a-z])" + re.escape(alias), names) for alias in app_aliases)
+        for app, app_aliases in aliases.items()
+    }
+    complete = applications.get("complete", False)
     rows = []
     for entry in inventory["entries"]:
         app = entry["application"]
-        if app not in aliases:
+        if app not in found_map:
             continue
-        found = any(alias in names for alias in aliases[app])
+        found = found_map[app]
         rows.append({"candidate_id": entry["id"], "application": app,
                      "association": "present-in-native-inventory" if found else "not-observed-in-native-inventory",
                      "possible_leftover": not found, "classification": "REVIEW", "automatic_removal": False,
-                     "inventory_complete": applications.get("complete", False),
+                     "inventory_complete": complete,
                      "reason": "A missing executable or incomplete installed inventory never establishes safe deletion"})
     return {"associations": rows, "changes_made": False}
 
@@ -292,6 +326,7 @@ def profiles(request):
 def snapshots(request):
     store = core.Store(request["state_dir"])
     if request.get("snapshot_id"):
+        core.require(isinstance(request["snapshot_id"], str), "Invalid snapshot identifier")
         return store.load("snapshot-" + request["snapshot_id"] + ".json")
     core.require(request.get("user_approved") is True, "Saving a private inventory snapshot requires consent")
     snapshot = {"id": core.secrets.token_hex(16), "created_at": core.now(), "inventory": request["inventory"],
@@ -301,19 +336,28 @@ def snapshots(request):
 
 
 def resolve_scope(request):
-    restrictions = policy(request.get("policy", {}))
+    core.require(not (request.get("policy") and request.get("profile_id")), "Choose policy or profile_id, not both")
+    restrictions = policy(request.get("policy") or {})
     if request.get("profile_id"):
+        core.require(isinstance(request["profile_id"], str) and request.get("state_dir"), "A saved profile requires state_dir")
         restrictions = policy(core.Store(request["state_dir"]).load("profile-" + request["profile_id"] + ".json")["policy"])
-    roots = request.get("roots", restrictions.get("roots"))
+    roots = request.get("roots") if "roots" in request and request["roots"] is not None else restrictions.get("roots")
     core.require(roots, "Explicit roots are required for every mode")
     if restrictions.get("roots"):
         allowed = [Path(os.path.abspath(os.path.expanduser(x))) for x in restrictions["roots"]]
         core.require(all(any(core.inside(Path(os.path.abspath(os.path.expanduser(r))), a) for a in allowed) for r in roots), "Requested root exceeds profile scope")
-    scan_request = {k: request[k] for k in ("max_entries", "max_seconds", "max_depth") if k in request}
+    scan_request = {k: request[k] for k in ("max_entries", "max_seconds", "max_depth") if k in request and request[k] is not None}
     for key in ("max_entries", "max_seconds", "max_depth"):
         if key in restrictions:
-            scan_request[key] = min(scan_request.get(key, restrictions[key]), restrictions[key])
-    scan_request.update(roots=roots, exclude=list(dict.fromkeys(request.get("exclude", []) + restrictions.get("exclude", []))))
+            if key in scan_request:
+                value = scan_request[key]
+                core.require(isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value), "Invalid scan budget")
+                scan_request[key] = min(value, restrictions[key])
+            else:
+                scan_request[key] = restrictions[key]
+    raw_exclude = request.get("exclude") or []
+    core.require(isinstance(raw_exclude, list) and all(isinstance(x, str) and x.strip() for x in raw_exclude), "Exclusions must be nonempty strings")
+    scan_request.update(roots=roots, exclude=list(dict.fromkeys(raw_exclude + restrictions.get("exclude", []))))
     return scan_request, restrictions
 
 
@@ -324,10 +368,13 @@ def audit(request):
         return compare(request)
     scan_request, restrictions = resolve_scope(request)
     inventory = core.scan(scan_request)
-    analysis_request = {"inventory": inventory, "top": request.get("top", 20), "sort_by": request.get("sort_by", "size")}
+    top = core._bounded_int(request.get("top"), 20, 1, 100, "Invalid top limit")
+    analysis_request = {"inventory": inventory, "top": top, "sort_by": request.get("sort_by", "size")}
     if mode == "duplicates" or request.get("duplicates"):
+        raw_hash = request.get("max_hash_bytes")
+        req_hash = core._bounded_int(raw_hash, 256 * 1024**2, 0, 4 * 1024**3, "Invalid hash byte budget")
         analysis_request.update(duplicates=True, content_read_approved=request.get("content_read_approved", False),
-                                max_hash_bytes=min(request.get("max_hash_bytes", 256 * 1024**2), restrictions.get("max_hash_bytes", 4 * 1024**3)))
+                                max_hash_bytes=min(req_hash, restrictions.get("max_hash_bytes", 4 * 1024**3)))
     analysis = core.analyze(analysis_request)
     return {"schema_version": 1, "mode": mode, "inventory": inventory, "analysis": analysis,
             "proposal": recommendations({"inventory": inventory, "project_artifacts": analysis["project_artifacts"],

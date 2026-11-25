@@ -1,6 +1,7 @@
 """Local NTFS file handles for explicit, digest-bound Windows removal plans."""
 import ctypes as c
 from ctypes import wintypes as w
+import functools
 import os
 from pathlib import Path
 
@@ -22,6 +23,7 @@ class BasicInfo(c.Structure):
                 ('changed', c.c_longlong), ('attributes', w.DWORD)]
 
 
+@functools.lru_cache(maxsize=1)
 def _api():
     core.require(os.name == 'nt', 'Direct selected-file removal currently requires Windows and local NTFS')
     kernel = c.WinDLL('kernel32', use_last_error=True)
