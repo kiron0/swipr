@@ -16,7 +16,8 @@ def default_roots():
     core.require(home != Path(home.anchor) and not core.protected(home), "Choose a local user folder; the default profile is protected or is a drive root")
     if os.name == 'nt':
         import ctypes
-        drive_type = ctypes.windll.kernel32.GetDriveTypeW
+        kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+        drive_type = kernel32.GetDriveTypeW
         drive_type.argtypes = [ctypes.c_wchar_p]
         drive_type.restype = ctypes.c_uint
         core.require(drive_type(str(home.anchor)) == 3,
@@ -56,7 +57,13 @@ def review_prompt(result):
 
 def run(request, output=None):
     request = {'max_entries': 100000, 'max_depth': 32, 'max_seconds': 60, **request}
-    inferred = not request.get('roots') and not request.get('policy', {}).get('roots') and not request.get('profile_id')
+    policy_obj = request.get('policy') or {}
+    has_roots = bool(request.get('roots') or policy_obj.get('roots'))
+    if not has_roots and request.get('profile_id'):
+        core.require(isinstance(request['profile_id'], str) and request.get('state_dir'), 'A saved profile requires state_dir')
+        saved = audit.policy(core.Store(request['state_dir']).load('profile-' + request['profile_id'] + '.json')['policy'])
+        has_roots = bool(saved.get('roots'))
+    inferred = not has_roots
     if inferred:
         request['roots'] = default_roots()
     scope, _ = audit.resolve_scope(request)

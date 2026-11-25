@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.1.6 — 2026-11-26
+
+- Harden request validation: empty or blank roots and exclusions, boolean or
+  non-numeric scan budgets, `top` and hash byte budgets, snapshot and profile
+  identifiers, candidate ID lists and removal plan fields are refused with a clear
+  error instead of raising or being silently coerced. `policy` and `profile_id`
+  cannot be combined, and a saved profile requires `state_dir`.
+- Read saved state and removal records through a no-follow handle and require a
+  regular, owner-only file (and an owner-only records directory on POSIX). `verify`
+  rejects items outside the recorded plan, and `history operations` scans more
+  directory entries before reaching its 2,000-record limit.
+- Protect more data: `System Volume Information`, case-insensitive `.env*` names,
+  and hashing now honors scan exclusions and refuses non-regular files. Windows
+  system folders are protected only at the drive root, so per-user paths such as
+  `AppData\Local\Microsoft\Windows\WER` match their rules.
+- Treat more build manifests (`pom.xml`, Gradle, `tsconfig.json`, `global.json` and
+  others) as source files, and have the offline-preservation policy also protect
+  dependency stores.
+- Escape every Markdown table cell against links, HTML and table breaks while
+  keeping quotes readable, and place the unknown-disk-space note above the report
+  table instead of inside its header.
+- Run native and Docker commands through one bounded runner that always stops the
+  child on timeout, oversized output or a monitoring failure. Windows PowerShell
+  queries return JSON arrays even for a single row, and `activity` matches open
+  files by resolved path.
+- Count hard-linked files once per directory while counting distinct files
+  normally, refuse non-finite JSON output, keep an already-written `--output` file
+  from being overwritten by a later error, and replace unencodable console
+  characters instead of failing.
+- Speed up scanning with breadth-first traversal, one prepared rule index per scan,
+  cached bytecode project markers and POSIX directory handles in place of repeated
+  per-component checks.
+- Skip editor and OS metadata files when packaging, ignore dependency and build
+  folders in Markdown link checks, and keep the permission test running without
+  `jsonschema` installed.
+
 ## 0.1.5 — 2026-11-08
 
 - Make `start --guide` without folders suggest `start` for the bounded current-user

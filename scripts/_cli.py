@@ -1,9 +1,11 @@
 """Command adapter over Swipr's existing deterministic helpers and approval gates."""
 import argparse
 import contextlib
+import html
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import stat
 import time
@@ -191,7 +193,8 @@ def parser():
 
 
 def scoped(args, allow_default=False):
-    core.require((args.root is None or all(args.root)) and all(args.exclude), "Scan and exclusion paths cannot be empty")
+    core.require((args.root is None or all(isinstance(x, str) and x.strip() for x in args.root))
+                 and all(isinstance(x, str) and x.strip() for x in args.exclude), "Scan and exclusion paths cannot be empty")
     core.require(1 <= args.top <= 100, "--top must be between 1 and 100")
     core.require(1 <= args.max_entries <= 100000 and 0 <= args.max_depth <= 64 and .01 <= args.max_seconds <= 120, "Invalid scan budget: entries 1–100000, depth 0–64, seconds 0.01–120")
     core.require(not (args.policy and args.profile_id), "Choose --policy or --profile-id, not both")
@@ -238,8 +241,9 @@ def dispatch(args):
                 result["matches"] = result["analysis"]["duplicates"]
             else:
                 extensions = {"." + x.lower().lstrip(".") for x in args.extension}
+                now_ns = time.time_ns()
                 entries = [e for e in result["inventory"]["entries"] if e["logical_bytes"] >= args.min_bytes
-                           and (not args.older_than_days or time.time_ns() - e["identity"]["mtime_ns"] >= args.older_than_days * 86400 * 10**9)
+                           and (not args.older_than_days or now_ns - e["identity"]["mtime_ns"] >= args.older_than_days * 86400 * 10**9)
                            and (not extensions or Path(e["path"]).suffix.lower() in extensions)]
                 result["matches"] = audit.sort_entries(entries, args.sort)[:min(args.top, 100)]
         result["guidance"] = guide.next_steps(result["inventory"], args.output)
@@ -290,7 +294,9 @@ def dispatch(args):
 
 
 def cell(value):
-    return str(value).replace("|", "\\|").replace("\n", " ")
+    # quote=False: numeric entities such as &#x27; would be broken by escaping "#".
+    escaped = html.escape(str(value).replace("\n", "\\n").replace("\r", "\\r"), quote=False)
+    return re.sub(r"([\\`*_{}\[\]()#!|>])", r"\\\1", escaped)
 
 
 def relative(path, roots):
@@ -341,28 +347,40 @@ def render_matches(action, matches, roots):
 def reserve_output(path):
     file = Path(os.path.abspath(os.path.expanduser(path)))
     existing = file.parent
-    while not existing.exists():
+    while not os.path.lexists(existing):
         existing = existing.parent
     core.absolute(existing)
     file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     core.absolute(file.parent)
-    return os.fdopen(os.open(file, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600), "w", encoding="utf-8")
+    if os.path.lexists(file):
+        raise FileExistsError("Output already exists")
+    fd = os.open(file, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        return os.fdopen(fd, "w", encoding="utf-8")
+    except BaseException:
+        os.close(fd)
+        raise
 
 
 def main(argv=None):
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            with contextlib.suppress(OSError, ValueError):
+                stream.reconfigure(errors="replace")
     root = parser(); args = root.parse_args(argv)
     if not getattr(args, "route", None):
         root.print_help(); return 0
     if args.route == "help":
         root.parse_args([*args.topic, "--help"]); return 0
     output = None
+    output_written = False
     stage = 'output creation' if args.output else 'command execution'
     try:
         if args.output:
             output = reserve_output(args.output)
         stage = 'command execution'
         result = dispatch(args)
-        encoded = json.dumps({"ok": True, "result": result}, ensure_ascii=True)
+        encoded = json.dumps({"ok": True, "result": result}, ensure_ascii=True, allow_nan=False)
         text = result.get("markdown") if isinstance(result, dict) else None
         if args.json:
             display = encoded
@@ -395,6 +413,7 @@ def main(argv=None):
             display = text or json.dumps(result, ensure_ascii=True, indent=2)
         if output:
             stage = 'result saving'
+            output_written = True
             output.write(text if args.route == "report" and not args.json else encoded + "\n")
             output.flush(); os.fsync(output.fileno())
         print(display)
@@ -406,7 +425,7 @@ def main(argv=None):
         if isinstance(getattr(error, 'winerror', None), int):
             detail['winerror'] = error.winerror
         encoded = json.dumps({"ok": False, "error": detail})
-        if output:
+        if output and not output_written:
             with contextlib.suppress(OSError):
                 output.write(encoded + "\n"); output.flush()
         print(encoded if args.json else "swipr: " + message, file=sys.stdout if args.json else sys.stderr)

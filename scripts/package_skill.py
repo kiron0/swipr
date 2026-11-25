@@ -14,7 +14,7 @@ def build(destination):
     with zipfile.ZipFile(destination, "x", compression=zipfile.ZIP_DEFLATED) as archive:
         for path in sorted(BASE.rglob("*")):
             relative = path.relative_to(BASE)
-            if not path.is_file() or "__pycache__" in relative.parts:
+            if not path.is_file() or "__pycache__" in relative.parts or path.name in {".DS_Store", "Thumbs.db", "Desktop.ini"} or path.suffix in {".pyc", ".pyo"}:
                 continue
             if str(relative) not in included and relative.parts[0] not in folders:
                 continue

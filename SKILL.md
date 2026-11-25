@@ -5,7 +5,7 @@ license: MIT
 compatibility: Requires a local agent with filesystem tools and Python 3.10+. macOS, Linux and Windows share one audit and digest-bound permanent-removal flow for selected owned local files. Removal needs POSIX directory handles or local NTFS on Windows. Duplicate content hashing requires POSIX directory handles.
 metadata:
   author: Toufiq Hasan Kiron
-  version: "0.1.5"
+  version: "0.1.6"
 ---
 
 # Swipr
@@ -14,7 +14,7 @@ Audit storage. Explain findings. Review every change.
 
 ## Commands and first use
 
-For `start`, `help`, `doctor`, `scan`, `find`, `explain`, `inspect`, `plan`, `approve`, `clean`, `verify`,
+For `start`, `help`, `doctor`, `scan`, `find`, `explain`, `inspect`, `plan`, `clean`, `verify`,
 `report`, `history`, `profile`, or `catalog`, read [COMMANDS.md](COMMANDS.md).
 Run the documented command using the installed `scripts/swipr.py` adapter and an
 argument array. It delegates to the same guarded helpers below. Never construct
